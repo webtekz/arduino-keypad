@@ -13,7 +13,9 @@
 #include <stdbool.h>
 
 #define PASSWD_LENGTH 4
-#define DEBOUNCE_TIME 100
+#define POLLING_INTERVAL 10  // time delay between polling events
+#define DEBOUNCE_ITER 5      // number of consecutive true samples for keypress to register
+#define SAMPLE_TIME_US 1000  // time in microseconds to wait before sampling the rows
 
 #define u8 uint8_t
 
@@ -27,6 +29,10 @@
 static const u8 row_ports[4] = {PL7, PL5, PL3, PL1};
 static const u8 col_ports[4] = {PD3, PD2, PD1, PD0};
 
+static u8 deb_matrix[4][DEBOUNCE_ITER] = {0};  // place to record last DEBOUNC_ITER reads of pins
+static u8 deb_idx = 0;                         // column index for deb_matrix
+static u8 prev_state[4] = {0};                 // previous debounced state for edge detection
+
 static const u8 matrix_chars[4][4] = {
  {'1', '2', '3', 'A'},
  {'4', '5', '6', 'B'},
@@ -34,16 +40,12 @@ static const u8 matrix_chars[4][4] = {
  {'*', '0', '#', 'D'}
 };
 
-/* matrix_ statetracks when a button is pressed or not pressed. */
-/* Statically allocated to ensure that held-down buttons are    */
-/* tracked over multiple calls of get_pass().                   */
-static bool matrix_state[4][4] = {0};
-
 static u8 pass_buf[PASSWD_LENGTH] = {0};  // password buffer, statically allocated
 
 /* internal function prototypes */
 static void init_io(void);
 static void get_pass(void);
+static void scan_debounce(u8* out_matrix, u8* changed_matrix);
 
 
 int main(void)
@@ -86,41 +88,86 @@ static void init_io(void)
 }
 
 
-/* get_pass probes each row for each column and determines what key is is    */
-/* pressed in the matrix. Each column is pulled LOW, which will pull a       */
-/* respective row LOW if that row and column are connected by a pressed      */
-/* keypad switch. Swtiches are debounced on both press and release for       */
-/* DEBOUNCE_TIME ms. PASSWD_LENGTH characters are accepted and then the      */
-/* function returns. The password is then stored in pass_buf.                */
+/* get_pass uses scan_debounce to get both the current state and detected    */
+/* edges for each button in the matrix. Button presses are recorded, placing */
+/* each typed character in pass_buf until PASSWD_LENGTH characters have been */
+/* typed. The function then returns, with the entered characters in          */
+/* pass_buf.                                                                 */
+/* This may be changed to a get_char function in the future, with the        */
+/* polling being done higher up in main() or some other function. This will  */
+/* have to wait for when I get the LCD and have to write the driver for it.  */
 static void get_pass(void)
 {
-  u8 r, c;          // row and column indices
-  u8 state;         // tempvar for storing logical pin state of each row
-  u8 pass_idx = 0;  // current index in pass_buf
+  u8 r, c;                                // row and column indices
+  u8 state_matrix[4], changed_matrix[4];  // storage for current matrix state and edges
+  u8 pin_state, pin_changed;              // temp vars for the current pin's state and edge
+  u8 pass_idx = 0;                        // current index in pass_buf
 
   while(pass_idx < PASSWD_LENGTH)
   {
+    scan_debounce(state_matrix, changed_matrix);  // get debounced output
+    _delay_ms(POLLING_INTERVAL);                  // delay for polling rate
     for(c = 0; c < 4; c++)
     {
-      OUT_PORT &= ~_BV(col_ports[c]);  // set column output to LOW for probing
       for(r = 0; r < 4; r++)
       {
-        /* get state for each row pin -- button is pressed if pin is pulled low */
-        state = !(IN_PIN & _BV(row_ports[r]));
-        if(state && !matrix_state[r][c])  // if button is pressed and it has not been processed
+        /* get state for each row pin -- changed is true when an edge is detected */
+        pin_state = state_matrix[c] & _BV(row_ports[r]);
+        pin_changed = changed_matrix[c] & _BV(row_ports[r]);
+
+        /* When pin_state is true and pin_changed is true, the respective button  */
+        /* is pressed and it's on a rising edge, an event that only happens once  */
+        /* per keypress.                                                          */
+        if(pin_state && pin_changed)
         {
-          _delay_ms(DEBOUNCE_TIME);                 // let switch stablize
-          matrix_state[r][c] = true;                // button has now been processed
           pass_buf[pass_idx] = matrix_chars[r][c];  // add char to the password
           pass_idx++;
         }
-        else if (!state && matrix_state[r][c])
-        {
-          _delay_ms(DEBOUNCE_TIME);    // let switch stablize
-          matrix_state[r][c] = false;  // switch is no longer pressed and is ready for new cycle
-        }
       }
-      OUT_PORT |= _BV(col_ports[c]);   // restore column to HIGH
     }
   }
+}
+
+
+/* scan_debounce reads the entire matrix by probing each column and sampling */
+/* the rows. It does this by driving each column LOW and then recording      */
+/* the rows which get pulled down by that column.                            */
+/*                                                                           */
+/* Debouncing is performed by keeping track of the last DEBOUNCE_ITER reads  */
+/* for each pin, for each column, for a total of 4 x 4 x DEBOUNCE_ITER bits, */
+/* stored in deb_matrix. The debounced output is the bitwise AND of all bits */
+/* in the third dimension of that matrix, producing a 1 for each button only */
+/* if all previous DEBOUNCE_ITER reads were 1.                               */
+/* Edges are detected by keeping track of the debounced output (NOT          */
+/* deb_matrix) previously output by scan_debounce, and using XOR to find     */
+/* bits that changed between the previous iteration and the current.         */
+/*                                                                           */
+/* The ideas behind this algorithm were provided by Jack Ganssle of the      */
+/* Ganssle Group, in an excellent article on hardware and software           */
+/* debouncing.                                                               */
+/* It can be found at:                                                       */
+/* http://www.ganssle.com/debouncing.htm                                     */
+static void scan_debounce(u8* out_matrix, u8* changed_matrix)
+{
+  u8 i, j;
+  for(i = 0; i < 4; i++)
+  {
+    OUT_PORT &= ~_BV(col_ports[i]);       // set column output to LOW for probing
+    _delay_us(SAMPLE_TIME_US);            // wait for signals to propagate
+    deb_matrix[i][deb_idx] = ~IN_PIN;     // bitwise NOT is b/c button pressed when pin LOW
+    OUT_PORT |= _BV(col_ports[i]);        // restore column to HIGH
+
+    out_matrix[i] = 0xFF;                 // init output, will be AND of the row's last iterations
+    for(j = 0; j < DEBOUNCE_ITER; j++)
+    {
+      out_matrix[i] &= deb_matrix[i][j];  // bitwise AND the past DEBOUNCE_ITER samples
+    }
+
+    changed_matrix[i] = out_matrix[i] ^ prev_state[i];  // compare current state with previous
+    prev_state[i] = out_matrix[i];
+  }
+
+  deb_idx++;
+  if(deb_idx >= DEBOUNCE_ITER)  // if deb_idx overflows, reset to 0
+    deb_idx = 0;
 }
