@@ -17,6 +17,10 @@
 #define DEBOUNCE_ITER 5      // number of consecutive true samples for keypress to register
 #define SAMPLE_TIME_US 1000  // time in microseconds to wait before sampling the rows
 
+/* Note that, in the current implementation, the polling delay and sample delay add up. */
+/* This means that the total cycle time is 4*SAMPLE_TIME + POLLING_INTERVAL.            */
+/* Keep in mind SAMPLE_TIME_US is in microseconds.                                      */
+
 #define u8 uint8_t
 #define u16 uint16_t
 
@@ -47,7 +51,7 @@ static u8 pass_buf[PASSWD_LENGTH] = {0};  // password buffer, statically allocat
 static void init_io(void);
 static u8 kp_get_char(void);
 static void kp_get_str(u8* str, u16 count);
-static void scan_debounce(u8* out_matrix, u8* changed_matrix);
+static void scan_debounce(u8* state_matrix, u8* changed_matrix);
 
 
 int main(void)
@@ -67,6 +71,8 @@ int main(void)
     PORTB ^= _BV(PB7);
     _delay_ms(1000);
   }
+
+  return 0;
 }
 
 
@@ -155,7 +161,7 @@ static void kp_get_str(u8* str, u16 count)
 /* debouncing.                                                               */
 /* It can be found at:                                                       */
 /* http://www.ganssle.com/debouncing.htm                                     */
-static void scan_debounce(u8* out_matrix, u8* changed_matrix)
+static void scan_debounce(u8* state_matrix, u8* changed_matrix)
 {
   u8 i, j;
   for(i = 0; i < 4; i++)
@@ -165,14 +171,14 @@ static void scan_debounce(u8* out_matrix, u8* changed_matrix)
     deb_matrix[i][deb_idx] = ~IN_PIN;     // bitwise NOT is b/c button pressed when pin LOW
     OUT_PORT |= _BV(col_ports[i]);        // restore column to HIGH
 
-    out_matrix[i] = 0xFF;                 // init output, will be AND of the row's last iterations
+    state_matrix[i] = 0xFF;                 // init output, will be AND of the row's last iterations
     for(j = 0; j < DEBOUNCE_ITER; j++)
     {
-      out_matrix[i] &= deb_matrix[i][j];  // bitwise AND the past DEBOUNCE_ITER samples
+      state_matrix[i] &= deb_matrix[i][j];  // bitwise AND the past DEBOUNCE_ITER samples
     }
 
-    changed_matrix[i] = out_matrix[i] ^ prev_state[i];  // compare current state with previous
-    prev_state[i] = out_matrix[i];
+    changed_matrix[i] = state_matrix[i] ^ prev_state[i];  // compare current state with previous
+    prev_state[i] = state_matrix[i];
   }
 
   deb_idx++;
