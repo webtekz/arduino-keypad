@@ -18,6 +18,7 @@
 #define SAMPLE_TIME_US 1000  // time in microseconds to wait before sampling the rows
 
 #define u8 uint8_t
+#define u16 uint16_t
 
 #define IN_PORT PORTL   // input port PORT register (sets pullup resistor)
 #define IN_DDR DDRL     // input port DDR register (sets port as input/output)
@@ -29,7 +30,7 @@
 static const u8 row_ports[4] = {PL7, PL5, PL3, PL1};
 static const u8 col_ports[4] = {PD3, PD2, PD1, PD0};
 
-static u8 deb_matrix[4][DEBOUNCE_ITER] = {0};  // place to record last DEBOUNC_ITER reads of pins
+static u8 deb_matrix[4][DEBOUNCE_ITER] = {0};  // place to record last DEBOUNCE_ITER reads of pins
 static u8 deb_idx = 0;                         // column index for deb_matrix
 static u8 prev_state[4] = {0};                 // previous debounced state for edge detection
 
@@ -44,7 +45,8 @@ static u8 pass_buf[PASSWD_LENGTH] = {0};  // password buffer, statically allocat
 
 /* internal function prototypes */
 static void init_io(void);
-static void get_pass(void);
+static u8 kp_get_char(void);
+static void kp_get_str(u8* str, u16 count);
 static void scan_debounce(u8* out_matrix, u8* changed_matrix);
 
 
@@ -55,7 +57,7 @@ int main(void)
   DDRB |= _BV(DDB7);   // PB7 is wired to the Arduino LED on the mega2560. 
   PORTB &= ~_BV(PB7);  // turn off LED
 
-  get_pass();
+  kp_get_str(pass_buf, PASSWD_LENGTH);
 
   /* When 4 chars are entered, flash the LED. */
   /* This is a placeholder for until I get a  */
@@ -88,22 +90,16 @@ static void init_io(void)
 }
 
 
-/* get_pass uses scan_debounce to get both the current state and detected    */
-/* edges for each button in the matrix. Button presses are recorded, placing */
-/* each typed character in pass_buf until PASSWD_LENGTH characters have been */
-/* typed. The function then returns, with the entered characters in          */
-/* pass_buf.                                                                 */
-/* This may be changed to a get_char function in the future, with the        */
-/* polling being done higher up in main() or some other function. This will  */
-/* have to wait for when I get the LCD and have to write the driver for it.  */
-static void get_pass(void)
+/* kp_get_char uses scan_debounce to get both the current state and detected */
+/* edges for each button in the matrix. The function repeatedly polls the    */
+/* keypad for a character until a keypress is detected.                      */
+static u8 kp_get_char(void)
 {
   u8 r, c;                                // row and column indices
   u8 state_matrix[4], changed_matrix[4];  // storage for current matrix state and edges
   u8 pin_state, pin_changed;              // temp vars for the current pin's state and edge
-  u8 pass_idx = 0;                        // current index in pass_buf
 
-  while(pass_idx < PASSWD_LENGTH)
+  while(true)
   {
     scan_debounce(state_matrix, changed_matrix);  // get debounced output
     _delay_ms(POLLING_INTERVAL);                  // delay for polling rate
@@ -120,11 +116,23 @@ static void get_pass(void)
         /* per keypress.                                                          */
         if(pin_state && pin_changed)
         {
-          pass_buf[pass_idx] = matrix_chars[r][c];  // add char to the password
-          pass_idx++;
+          return matrix_chars[r][c];
         }
       }
     }
+  }
+}
+
+
+/* kp_get_str uses kp_get_char to retrieve count characters from the keypad. */
+/* kp_get_char is simply run count times to fill the location pointed to by  */
+/* str. It is assumed writing count chars to str will not cause an error.    */
+static void kp_get_str(u8* str, u16 count)
+{
+  u16 i;
+  for(i = 0; i < count; i++)
+  {
+    str[i] = kp_get_char();
   }
 }
 
